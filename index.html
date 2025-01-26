@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Gasless Transfer</title>
+    <script src="https://cdn.jsdelivr.net/npm/ethers@5.2.0/dist/ethers.umd.min.js"></script>
+    <style>
+        body { font-family: Arial, sans-serif; max-width: 600px; margin: 20px auto; padding: 20px; }
+        input { width: 100%; padding: 8px; margin: 5px 0; border: 1px solid #ddd; border-radius: 4px; }
+        button { background: #2196F3; color: white; border: none; padding: 10px 20px; border-radius: 4px; cursor: pointer; }
+        button:hover { background: #1976D2; }
+        #output { margin-top: 20px; padding: 15px; background: #f5f5f5; border-radius: 4px; word-break: break-all; }
+        .warning { color: #d32f2f; margin: 10px 0; }
+    </style>
+</head>
+<body>
+    <h1>Gasless Token Transfer</h1>
+    
+    <input type="text" id="tokenAddress" placeholder="Token Contract Address (0x...)" pattern="^0x[a-fA-F0-9]{40}$">
+    <input type="text" id="recipient" placeholder="Recipient Address (0x...)" pattern="^0x[a-fA-F0-9]{40}$">
+    <input type="text" id="amount" placeholder="Amount (ERC-20) or Token ID (ERC-721)">
+    
+    <button onclick="signAndExecute()">Start Gasless Transfer</button>
+    <div class="warning">For testing only - do not use with real funds!</div>
+    
+    <div id="output"></div>
+
+    <script>
+        // CONFIGURATION (REPLACE THESE VALUES)
+        const FORWARDER_ADDRESS = '0x11be749f3a719d3db908DF0a744Ed1fDc2EEBaBa'; // Your deployed forwarder address
+        const INFURA_URL = 'https://eth-sepolia.g.alchemy.com/v2/IBQBdutBaPKQgt6-lQ7HsjY1No5JgVMY'; 
+        const RELAYER_PRIV_KEY = 'fe87628798980672e227d0243ae3f01e1de78a813f4375bef63646d66ce130f7'; // Relayer account private key
+
+        async function signAndExecute() {
+            const output = document.getElementById('output');
+            output.innerHTML = 'Processing...';
+            
+            try {
+                // Validate inputs
+                if (!validateInputs()) return;
+
+                // Connect to MetaMask
+                if (!window.ethereum) throw new Error('Please install MetaMask!');
+                const userProvider = new ethers.providers.Web3Provider(window.ethereum);
+                await userProvider.send("eth_requestAccounts", []);
+                const userSigner = userProvider.getSigner();
+                const userAddress = await userSigner.getAddress();
+
+                // Get input values
+                const tokenAddress = document.getElementById('tokenAddress').value;
+                const recipient = document.getElementById('recipient').value;
+                const amount = document.getElementById('amount').value;
+
+                // Get current nonce
+                const forwarder = new ethers.Contract(
+                    FORWARDER_ADDRESS,
+                    ["function nonces(address) view returns (uint256)"],
+                    userProvider
+                );
+                const nonce = await forwarder.nonces(userAddress);
+
+                // Prepare transaction data (ERC-20 transferFrom)
+                const erc20Abi = ["function transferFrom(address, address, uint256)"];
+                const iface = new ethers.utils.Interface(erc20Abi);
+                const data = iface.encodeFunctionData('transferFrom', [
+                    userAddress,
+                    recipient,
+                    ethers.utils.parseUnits(amount, 18)
+                ]);
+
+                // Sign EIP-712 message
+                const signature = await userSigner._signTypedData(
+                    {
+                        name: 'GaslessForwarder',
+                        version: '1',
+                        chainId: (await userProvider.getNetwork()).chainId,
+                        verifyingContract: FORWARDER_ADDRESS
+                    },
+                    {
+                        ForwardRequest: [
+                            { name: 'from', type: 'address' },
+                            { name: 'to', type: 'address' },
+                            { name: 'data', type: 'bytes' },
+                            { name: 'nonce', type: 'uint256' }
+                        ]
+                    },
+                    {
+                        from: userAddress,
+                        to: tokenAddress,
+                        data: data,
+                        nonce: nonce.toString()
+                    }
+                );
+
+                // Execute via relayer
+                const relayerProvider = new ethers.providers.JsonRpcProvider(INFURA_URL);
+                const relayerWallet = new ethers.Wallet(RELAYER_PRIV_KEY, relayerProvider);
+                const forwarderWithRelayer = new ethers.Contract(
+                    FORWARDER_ADDRESS,
+                    ["function execute(address,address,bytes,uint256,bytes)"],
+                    relayerWallet
+                );
+
+                const tx = await forwarderWithRelayer.execute(
+                    userAddress,
+                    tokenAddress,
+                    data,
+                    nonce,
+                    signature
+                );
+
+                output.innerHTML = `
+                    <h3>Transaction Submitted!</h3>
+                    <p>TX Hash: <a href="https://sepolia.etherscan.io/tx/${tx.hash}" target="_blank">${tx.hash}</a></p>
+                    <p>Waiting for confirmation...</p>
+                `;
+
+                const receipt = await tx.wait();
+                output.innerHTML += `
+                    <p>✅ Confirmed in block ${receipt.blockNumber}</p>
+                    <p>Gas used: ${receipt.gasUsed.toString()}</p>
+                `;
+
+            } catch (error) {
+                output.innerHTML = `Error: ${error.message}`;
+                console.error(error);
+            }
+        }
+
+        function validateInputs() {
+            const inputs = document.querySelectorAll('input');
+            let valid = true;
+            
+            inputs.forEach(input => {
+                if (!input.checkValidity()) {
+                    alert(`Invalid ${input.placeholder}`);
+                    valid = false;
+                }
+            });
+
+            return valid;
+        }
+    </script>
+</body>
+</html>
